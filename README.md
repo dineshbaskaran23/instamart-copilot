@@ -16,6 +16,8 @@ and all amounts are in INR. All model calls go through the offline `mock_llm.py`
 7. `python -m src.a_validate`
 8. `python -m src.a_sql_run`
 9. `python -m src.a_pandas_eda`
+10. `python -m src.b_rfm_cluster`
+11. `python -m src.b_lapse`
 (Parts B, C and D commands will be added here.)
 
 ## Part A
@@ -122,7 +124,53 @@ percentage at about -0.095, just ahead of amount and quantity at +0.087. Correla
 this small are close to no relationship, and they do not establish causation.)
 
 ## Part B
-(to be completed)
+(### RFM table
+Snapshot 2025-10-01 00:00:00, completed orders only.
+
+| Item | Value |
+|---|---|
+| Customers with at least one completed order | 1,175 |
+| Recency (days): median / min / max | 19 / 0 / 180 |
+| Frequency: mean / max | 9.46 / 33 |
+| Monetary (INR): mean / max | 2,552.06 / 14,766.55 |
+
+### K-means (StandardScaler, n_init=10, random_state=42)
+| K | Inertia | Silhouette |
+|---|---|---|
+| 2 | 1820.8 | 0.465 |
+| 3 | 1268.2 | 0.445 |
+| 4 | 743.1 | 0.526 |
+| 5 | 617.4 | 0.480 |
+| 6 | 503.2 | 0.482 |
+| 7 | 408.5 | 0.416 |
+| 8 | 366.5 | 0.412 |
+
+**Chosen K = 4.** Inertia falls steeply up to K=4 (1268 to 743) and much more slowly after
+it (743 to 617), so the elbow is at K=4. K=4 also has the highest silhouette score (0.526),
+and four segments are few enough for the business to run a campaign for each.
+
+**Why K=8 has lower inertia than K=2, yet this cannot pick K:** adding clusters always
+brings the centres closer to the points, so inertia keeps falling as K grows, and with one
+cluster per customer it would reach 0. A lower number alone therefore says nothing about
+whether the groups are useful, which is why the elbow, the silhouette and business
+interpretability decide.
+
+### Segments (K=4)
+Cluster numbers are only labels and have no ordering.
+
+| Cluster id | Name | Size | Mean recency (days) | Mean frequency | Mean monetary (INR) | Recommended action |
+|---|---|---|---|---|---|---|
+| 0 | Occasional shoppers | 436 | 28.86 | 3.77 | 1,057.62 | Offer small-basket bundles to raise the order rate |
+| 1 | Premium high spenders (Premium) | 138 | 24.12 | 6.77 | 7,129.70 | Early access to electronics offers and priority support |
+| 2 | Loyal frequent buyers | 419 | 8.77 | 19.40 | 3,410.02 | Loyalty or subscription programme to keep frequency high |
+| 3 | At-risk / lapsing | 182 | 109.04 | 2.20 | 685.99 | Win-back coupon, as the last order was about 109 days ago |
+
+Premium is the segment with the highest mean monetary value.
+
+### PCA (2 components on the scaled RFM matrix)
+Explained variance ratio: 0.634 and 0.218, total 0.852.
+Output file: `outputs/customer_segments.csv` (1,175 rows).)
+
 
 ## Part C
 (to be completed)
