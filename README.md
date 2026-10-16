@@ -18,6 +18,7 @@ and all amounts are in INR. All model calls go through the offline `mock_llm.py`
 9. `python -m src.a_pandas_eda`
 10. `python -m src.b_rfm_cluster`
 11. `python -m src.b_lapse`
+
 (Parts B, C and D commands will be added here.)
 
 ## Part A
@@ -169,9 +170,85 @@ Premium is the segment with the highest mean monetary value.
 
 ### PCA (2 components on the scaled RFM matrix)
 Explained variance ratio: 0.634 and 0.218, total 0.852.
-Output file: `outputs/customer_segments.csv` (1,175 rows).)
+Output file: `outputs/customer_segments.csv` (1,175 rows).
+### Lapse problem
+Cutoff 2025-09-01. Cohort: customers with a completed order before the cutoff.
+`lapsed` = 1 if there is no completed order from 2025-09-01 to 2025-09-30.
 
+| Item | Value |
+|---|---|
+| Cohort size | 1,156 |
+| Lapsed | 443 (38.32%) |
+| Train / test rows | 924 / 232 |
+| Baseline (always "not lapsed"): accuracy / lapsed F1 | 0.616 / 0.0 |
 
+Features: recency, frequency, monetary, average discount, cancellation rate, average
+delivery minutes, favourite category, city, age, gender, tenure in days.
+
+**No-leakage statements:** no order dated on or after 2025-09-01 entered the features; the
+segment labels from the clustering were not used as features; no encoder, scaler or
+resampler saw test rows (encoder and scaler sit inside a scikit-learn Pipeline fitted on
+training rows, and the over-sampler was applied to training rows only). No feature column
+has a missing value.
+
+Scaler mean of frequency (training rows): 8.115 vs full-cohort mean 8.029. They differ
+because the scaler learned its mean from the 924 training rows only, not all 1,156
+customers.
+
+### Tuning and test results
+| Model | Best parameters | Best CV F1 |
+|---|---|---|
+| Logistic regression | C = 100 | 0.651 |
+| Random forest | max_depth = 8, min_samples_leaf = 10 | 0.681 |
+
+Test set, lapsed class (confusion matrix as [[TN, FP], [FN, TP]]):
+
+| Model | Precision | Recall | F1 | Confusion matrix |
+|---|---|---|---|---|
+| Baseline | 0 | 0 | 0 | [[143, 0], [89, 0]] |
+| Logistic regression | 0.644 | 0.652 | 0.648 | [[111, 32], [31, 58]] |
+| Random forest | 0.659 | 0.652 | 0.655 | [[113, 30], [31, 58]] |
+
+**Selected model: random forest.** It had the higher cross-validated F1 (0.681 against
+0.651) and the slightly higher test F1 (0.655 against 0.648). Both models find the same 58
+of the 89 lapsing customers, and the forest raises 30 false alarms against 32. Missing a
+customer who is about to lapse loses their future orders, while wrongly targeting a loyal
+customer only costs a small coupon, so recall matters more than precision here.
+
+### Class-balance experiment
+Training rows only were over-sampled with replacement (random_state=42) to 570 / 570 per
+class, then the best logistic regression was refitted. The test set was unchanged.
+
+| Logistic model | Precision | Recall | F1 |
+|---|---|---|---|
+| Plain | 0.644 | 0.652 | 0.648 |
+| Balanced | 0.589 | 0.854 | 0.697 |
+
+Recall moved most (+0.202), while precision fell slightly (-0.055). The balanced model
+catches many more lapsing customers, but about 4 in 10 of the customers it flags are loyal
+ones, so the retention team gets a bigger list with more wasted offers. That is acceptable
+when a coupon is cheap compared with a lost customer.
+
+### Interpretation
+Top 5 random-forest features by importance: frequency 0.280, monetary 0.271, recency
+0.115, average delivery minutes 0.061, cancellation rate 0.052. How often and how much a
+customer buys are the strongest signals of whether they stay; long delivery times and
+cancellations also matter.
+
+Logistic coefficient signs (standardised features):
+- frequency: negative (-1.698). More orders before the cutoff means lower lapse risk.
+- recency: positive (0.040). A longer gap since the last order slightly raises lapse
+  risk, but the effect is small.
+- cancel_rate: negative (-0.124). A small effect that I would not read much into.
+
+### Saved model and retention list
+`outputs/lapse_model.joblib` was reloaded with joblib.load and reproduced the original
+test predictions exactly. `outputs/retention_list.csv` lists the top 10 Premium test-set
+customers by predicted lapse probability; 1 of the 10 truly lapsed. The predicted
+probabilities in the list are all below 0.5 (0.452 to 0.491), so the model is not
+confident about any of these customers. This list is illustrative and not a
+leakage-free evaluation, because the Premium flag comes from whole-window RFM that
+includes September, the window that defines the label.)
 ## Part C
 (to be completed)
 
@@ -179,4 +256,6 @@ Output file: `outputs/customer_segments.csv` (1,175 rows).)
 (to be completed)
 
 ## Limitations and Next Steps
-(to be completed)
+(   The Premium flag is a post-hoc whole-window label (its RFM includes September, the window
+   that defines the lapse label), so the retention list is illustrative and not a
+   leakage-free evaluation.)
