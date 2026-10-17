@@ -376,13 +376,13 @@ It returns status, final_answer, steps, llm_calls and tokens_used.
 ### Seven scenarios
 | Scenario | Status | Refund (INR) | Model calls | Tokens used |
 |---|---|---|---|---|
-| S1 | REFUND | 128.25 | 5 | ___ |
-| S2 | REFUND | 135.00 | 5 | ___ |
-| S3 | ESCALATE | 1999.00 (sent to a human, not issued) | 5 | ___ |
-| S4 | DENIED | 0.00 | 4 | ___ |
-| S5 | DENIED | 0.00 | 3 | ___ |
-| S6 | NOT_FOUND | 0.00 | 2 | ___ |
-| S7 | FALLBACK_MAX_ITERATIONS | 0.00 | 6 | ___ |
+| S1 | REFUND | 128.25 | 5 |1112 |
+| S2 | REFUND | 135.00 | 5 | 1112 |
+| S3 | ESCALATE | 1999.00 (sent to a human, not issued) | 5 | 1099 |
+| S4 | DENIED | 0.00 | 4 | 777 |
+| S5 | DENIED | 0.00 | 3 | 466 |
+| S6 | NOT_FOUND | 0.00 | 2 | 158 |
+| S7 | FALLBACK_MAX_ITERATIONS | 0.00 | 6 | 3258 |
 
 Every refund amount equals `expected_refund_inr` within 0.01. S7 uses a loop trigger in the
 message, finishes all six model calls under the default token limit of 6000, and then stops.
@@ -402,8 +402,12 @@ Every fallback returns the steps completed so far and a short hand-off message i
 
 | Demo (scenario S1) | Status |
 |---|---|
-| token_limit = 200 | FALLBACK_TOKEN_LIMIT (___ tokens used, ___ tools executed) |
+| token_limit = 200 | FALLBACK_TOKEN_LIMIT (483 tokens used, 2 tools executed) |
 | time_limit_seconds = 0 | FALLBACK_TIMEOUT (0 model calls) |
+
+The token total is checked after each model call, so the run stops on the call that crosses
+the limit. Here the third call pushed the total to 483, and the tool it asked for
+(calculate_refund) was not executed.
 
 ### Crash and resume
 After every tool observation a checkpoint is written to `state/<run id>.json` with the run
