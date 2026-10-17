@@ -18,6 +18,9 @@ and all amounts are in INR. All model calls go through the offline `mock_llm.py`
 9. `python -m src.a_pandas_eda`
 10. `python -m src.b_rfm_cluster`
 11. `python -m src.b_lapse`
+12. `python -m src.c_triage`
+13. `python -m src.d_rag`
+14. `python -m src.d_demos`
 
 (Parts B, C and D commands will be added here.)
 
@@ -250,12 +253,203 @@ confident about any of these customers. This list is illustrative and not a
 leakage-free evaluation, because the Premium flag comes from whole-window RFM that
 includes September, the window that defines the label.)
 ## Part C
-(to be completed)
+(### Input guardrails and redaction
+Before any model call, empty or whitespace-only tickets get `skipped_empty` and tickets
+with an estimated length above MAX_INPUT_TOKENS = 400 get `flagged_long`. Neither is ever
+sent to the model.
+
+| Item | Value |
+|---|---|
+| Empty tickets | 4 |
+| Long tickets | 4 (each about 734 estimated tokens) |
+
+Personal data is redacted with these patterns, in this order, before a prompt is built:
+email to `[EMAIL]`, phone `\b[6-9]\d{9}\b` to `[PHONE]`, order id `ORD-\d{6}` to `[ORDER_ID]`.
+The user message sent to the model is exactly the redacted ticket text.
+
+| Type | Substitutions |
+|---|---|
+| Emails | 55 |
+| Phone numbers | 91 |
+| Order ids | 132 |
+| Total | 278 |
+
+Re-applying the three patterns to the redacted texts finds 0 matches, and the code asserts
+that no pattern matches any prompt before each call.
+
+### Prompts
+Both prompts contain the word CLASSIFY, list the four categories (billing, delivery,
+technical, fraud) and require a JSON-only reply of the form
+`{"category": "...", "reason": "..."}`. The zero-shot prompt has no `EXAMPLES:` line (37
+estimated tokens). The few-shot prompt adds an `EXAMPLES:` line with four labelled examples,
+including a fraud one (115 estimated tokens).
+
+### Retries
+Every model call goes through a retry function: at most 3 retries per ticket, wait before
+retry n = 0.05 x 2^n x random.uniform(0.9, 1.15) seconds, one log line per retry. Each full
+run over the 156 eligible tickets raised exactly 19 transient errors and all were recovered
+by a retry, so no ticket ended with a permanent error. Every retry was retry number 0, with
+waits between 0.0453 and 0.0542 seconds (allowed range 0.045 to 0.0575). The log is in
+`outputs/retry_log.txt` (68 lines over the four runs).
+
+### Output validation
+A reply is accepted as `classified_json` if it is valid JSON with an allowed category. If it
+is not valid JSON, the lowercase words are extracted with `re.findall(r"[a-z]+", ...)` and
+the reply is accepted as `classified_keyword` if exactly one allowed category word is
+present. Everything else, including valid JSON with a category outside the list, is
+`flagged_invalid_output` and goes to a human. Nothing is guessed.
+
+| Status (one full run) | Tickets |
+|---|---|
+| classified_json | 135 |
+| classified_keyword | 12 |
+| flagged_invalid_output | 9 |
+| skipped_empty | 4 |
+| flagged_long | 4 |
+
+### Zero-shot versus few-shot
+| Run | Classified | Correct | Accuracy | Total tokens | Tokens per classified ticket |
+|---|---|---|---|---|---|
+| Zero-shot | 147 | 126 | 85.7% | 10,180 | 69.3 |
+| Few-shot | 147 | 147 | 100.0% | 22,348 | 152.0 |
+
+Zero-shot confusion table (rows = true category, columns = predicted):
+
+| true \ predicted | billing | delivery | fraud | technical |
+|---|---|---|---|---|
+| billing | 38 | 0 | 0 | 0 |
+| delivery | 0 | 36 | 0 | 0 |
+| fraud | 11 | 0 | 23 | 0 |
+| technical | 10 | 0 | 0 | 29 |
+
+(Points to use: the examples cost about 83 extra
+tokens per classified ticket, 152.0 against 69.3, so the whole run used 12,168 more tokens;
+in return accuracy rose by 14.3 points, from 85.7% to 100%. Every zero-shot error was a
+fraud ticket (11 of 34) or a technical ticket (10 of 39) sent to billing. A fraud ticket
+sent to billing misses the high-priority security route, so the extra tokens are worth
+paying here, while for low-stakes labels the cheaper zero-shot prompt would be enough.)
+
+### Token budget demo
+Zero-shot run with TOKEN_BUDGET = 6000: the budget is checked before every call, and once
+the running total reached 6000 no further call was made. 64 tickets ended `budget_exhausted`
+(routed to human review); 87 were classified before the budget ran out (6,010 tokens
+used). Result: `outputs/triage_budget_demo.csv`.
+
+### Routing and final output
+`outputs/triage_results.csv` (164 rows) comes from a few-shot run with TOKEN_BUDGET =
+100000, using the segment file from Part B. A customer with no row in the segment file is
+treated as not premium.
+
+| Route | Priority | Tickets |
+|---|---|---|
+| human_review | NORMAL | 17 |
+| security_team | HIGH | 34 |
+| premium_desk | HIGH | 11 |
+| support_queue | NORMAL | 102 |
+
+**Rule-validated vs human:** 147 tickets (135 JSON + 12 keyword) passed the validation rules
+and were routed automatically by category and segment. 17 tickets went to human review: 4
+empty, 4 too long and 9 with an invalid model answer. )
 
 ## Part D
-(to be completed)
+(### Tools
+Five tools are defined in `TOOLS_SPEC` (name, one-sentence description, JSON-style
+parameters) and mapped by name in `TOOL_MAP`. The model asks for a tool by name with an
+arguments dictionary, and the code looks the name up and calls the function.
+
+| Tool | What it does |
+|---|---|
+| get_order(order_id) | Reads `data/instamart.db`; returns order_id, status, order_amount, delivery_minutes, or `{"error": "order not found"}` |
+| search_policy(query) | Returns the top 3 chunks from the TF-IDF retrieval under `results` |
+| calculate_refund(order_amount, delivery_minutes) | 100% of the amount if delivery took more than 45 minutes, otherwise 0 |
+| issue_refund(order_id, refund_inr) | Appends a line (timestamp, tool name) to `outputs/refund_ledger.jsonl` |
+| escalate_to_human(order_id, refund_inr) | Appends a line to the same ledger; used for refunds above INR 1000 |
+
+### ReAct loop
+`run_agent(user_message, scenario_id, max_iterations=6, token_limit=6000,
+time_limit_seconds=10)` starts with a system message containing AGENT and the user message.
+Each iteration calls the model. If the reply has no tool call, its content is the final
+answer and the status is the word before the colon. Otherwise the assistant tool-call
+message is appended, the tool is run, and a tool message with the JSON result is appended.
+It returns status, final_answer, steps, llm_calls and tokens_used.
+
+### Seven scenarios
+| Scenario | Status | Refund (INR) | Model calls | Tokens used |
+|---|---|---|---|---|
+| S1 | REFUND | 128.25 | 5 | ___ |
+| S2 | REFUND | 135.00 | 5 | ___ |
+| S3 | ESCALATE | 1999.00 (sent to a human, not issued) | 5 | ___ |
+| S4 | DENIED | 0.00 | 4 | ___ |
+| S5 | DENIED | 0.00 | 3 | ___ |
+| S6 | NOT_FOUND | 0.00 | 2 | ___ |
+| S7 | FALLBACK_MAX_ITERATIONS | 0.00 | 6 | ___ |
+
+Every refund amount equals `expected_refund_inr` within 0.01. S7 uses a loop trigger in the
+message, finishes all six model calls under the default token limit of 6000, and then stops.
+One line per run is in `outputs/agent_runs.jsonl`.
+
+### Stop safely
+- **Max iterations:** after 6 model calls without a final answer the run stops with
+  `FALLBACK_MAX_ITERATIONS` (scenario S7).
+- **Token limit:** after each model call the tokens are added up, and if the total is above
+  the limit the run stops at once, without running the tool that was just requested
+  (`FALLBACK_TOKEN_LIMIT`).
+- **Time limit:** at the top of each iteration, if `time.monotonic()` shows that the limit
+  or more has passed, the run stops (`FALLBACK_TIMEOUT`).
+
+Every fallback returns the steps completed so far and a short hand-off message in
+`final_answer`.
+
+| Demo (scenario S1) | Status |
+|---|---|
+| token_limit = 200 | FALLBACK_TOKEN_LIMIT (___ tokens used, ___ tools executed) |
+| time_limit_seconds = 0 | FALLBACK_TIMEOUT (0 model calls) |
+
+### Crash and resume
+After every tool observation a checkpoint is written to `state/<run id>.json` with the run
+id, scenario id, the full message list, tokens used, the step number and the tools already
+executed. For S1 a simulated crash was raised right after the second tool execution (after
+its checkpoint was saved), and `resume_agent(run_id)` loaded the checkpoint and continued.
+
+Tools executed across the crash and the resume, in order:
+1. get_order
+2. search_policy
+3. calculate_refund
+4. issue_refund
+
+That is four executions with none repeated, and the final status was REFUND with INR 128.25.
+Demo runs are in `outputs/agent_demos.jsonl`. The ledger holds the S1 refund twice, once
+from the S1 scenario run and once from the crash-and-resume demo; the lines carry different
+`run_id` values.
+
+### ReAct versus plan-and-execute
+My ReAct agent asks the model what to do after every observation: S1 took 5 model calls, S5
+took 3, S6 took 2, and S7 used all 6 before the limit stopped it. A plan-and-execute design
+would ask the model once for the whole step list and run the tools from code, so a normal
+refund like S1 would need about 1 or 2 model calls instead of 5. It would also use fewer
+tokens, because the growing message history, including the policy text from the search,
+would not be sent back to the model after every tool.
+
+The difference shows with unexpected observations. With ReAct, a NOT_FOUND order (S6) or a
+cancelled order (S5) is seen by the model straight away, and it finishes after 2 or 3 calls.
+A plan written in advance would still contain the refund steps, so the code needs a check
+after every step and one extra model call to replan when the result is unexpected.
+
+For this refund workflow I would choose plan-and-execute with replanning only on error. The
+rules are fixed (look up, check status, compute, issue or escalate), so the plan is
+predictable and cheaper, and I would keep the step, token and time limits and the
+checkpoints. ReAct would be the better choice if the workflow were open-ended.)
 
 ## Limitations and Next Steps
-(   The Premium flag is a post-hoc whole-window label (its RFM includes September, the window
-   that defines the lapse label), so the retention list is illustrative and not a
-   leakage-free evaluation.)
+( The Premium flag is a post-hoc whole-window label (its RFM includes September, the window
+  that defines the lapse label), so the retention list is illustrative and not a
+  leakage-free evaluation.
+- All data is synthetic, and the language model is an offline mock that classifies by
+  keywords, so the 100% few-shot accuracy says more about the mock than about a real model.
+- The lapse test set has only 232 customers, so the F1 scores are noisy, and the model
+  could be improved with more behavioural features and probability calibration.
+- TF-IDF only matches exact words; embeddings would handle paraphrases better.
+- The agent handles one order per message and treats every request as inside the 7-day
+  window.
+- Next steps: evaluate on real tickets, add a human-in-the-loop review screen for escalated
+  refunds, and add monitoring for token cost and error rates.)
