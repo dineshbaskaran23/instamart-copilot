@@ -97,7 +97,8 @@ The pivot table total equals the SQL total (INR 2,998,668.80).
 | Hyderabad | 528,589.90 | 284.95 | 1,855 |
 | Mumbai | 479,058.50 | 297.00 | 1,613 |
 | Pune | 500,918.05 | 252.48 | 1,984 |
-(Add Chennai and Delhi from the script output.)
+| Chennai | 463,629.15 | 272.72 | 1,700 |
+| Delhi | 502,829.80 | 243.62 | 2,064 |
 
 ### Distribution of completed order_amount
 | Statistic | Value |
@@ -350,9 +351,52 @@ treated as not premium.
 **Rule-validated vs human:** 147 tickets (135 JSON + 12 keyword) passed the validation rules
 and were routed automatically by category and segment. 17 tickets went to human review: 4
 empty, 4 too long and 9 with an invalid model answer. )
-
 ## Part D
-(### Tools
+### Chunking
+Each policy file is split into chunks of 40 words with an overlap of 10 (each chunk starts
+30 words after the previous one, and the last chunk is the first whose end reaches the end
+of the document). Every chunk keeps its source file name. Overlap 10 gives 15 chunks:
+refund 4, delivery 3, escalation 3, payment 3, privacy 2.
+
+### Retrieval
+`TfidfVectorizer()` is fitted on the chunk texts, the query is transformed with the same
+fitted vectorizer, and chunks are ranked by cosine similarity. `retrieve(query, k=3)`
+returns dictionaries with source, score and text. For the query "refund policy late
+delivery" all three top chunks come from `refund_policy.txt` (scores 0.2719, 0.2514, 0.2454).
+
+TF (term frequency) measures how often a word appears inside a chunk, and IDF (inverse
+document frequency) measures how rare the word is across all chunks, so words that appear in
+few chunks count more. A limitation is that TF-IDF only matches exact words: a question that
+says "money back" will not match a policy sentence that says "refund", even though they mean
+the same thing.
+
+### Augment and answer
+`answer(question)` retrieves three chunks and sends two messages to the mock: a system
+message containing POLICY ASSISTANT that says to answer only from the context and to say it
+could not find the information otherwise, and a user message of the form
+`CONTEXT:` / three chunks, each preceded by `[<file name>]` / `QUESTION:` / the question.
+
+### Evaluation (14 questions: 12 answerable, 2 not covered)
+| Setting | Expected doc in top 3 | Expected fact in answer | Fallback on unanswerable |
+|---|---|---|---|
+| Overlap 10 | 12/12 | 12/12 | 2/2 |
+| Overlap 0 | 12/12 | 10/12 | 2/2 |
+
+With overlap 0 the documents give 13 chunks (delivery 3, escalation 2, payment 3, privacy 2,
+refund 3) instead of 15, and the answer sentence can be cut at a chunk boundary. Two
+questions break:
+- "What delivery time makes a completed order eligible for a full refund?" The sentence is
+  "If a completed order is delivered in more than 45 minutes, the customer receives a full
+  refund of the order amount." The retrieved chunk started in the middle of it, so the
+  answer was only "receives a full refund of the order amount." and the expected fact
+  "more than 45 minutes" was in the previous chunk.
+- "How soon is money returned when a payment fails but is deducted?" Here the retrieved
+  chunk ended in the middle of the sentence, so the answer stopped at "...the amount is
+  returned automatically" and "within 48 hours" was in the next chunk.
+
+The 10-word overlap repeats the words around each boundary, so at least one chunk holds
+the whole sentence.
+### Tools
 Five tools are defined in `TOOLS_SPEC` (name, one-sentence description, JSON-style
 parameters) and mapped by name in `TOOL_MAP`. The model asks for a tool by name with an
 arguments dictionary, and the code looks the name up and calls the function.
